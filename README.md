@@ -3738,6 +3738,7 @@ for idx in np.argsort(off.ravel())[::-1][:3]:     # 큰 값 순서로 3개
 
 **시작할 때**
 - [ ] Colab 새 노트북, **런타임 유형** 확인 (CNN이면 GPU가 빠름)
+- [ ] AI 기능 끄기: **도구 → 설정 → AI 지원** → '생성형 AI 기능 숨기기' 체크, '인라인 완성 표시'(회색 글씨 자동완성) 체크 해제
 - [ ] [0. 기본 import 세트](#0-기본-import-세트) 실행
 - [ ] 데이터 로드 후 `df.shape`, `df.head()`, `df.isnull().sum()`, `df.dtypes` 확인
 
@@ -3761,6 +3762,51 @@ for idx in np.argsort(off.ravel())[::-1][:3]:     # 큰 값 순서로 3개
 - [ ] 학습곡선 (train vs validation) 그리기
 - [ ] 문제에서 요구한 **출력(print)** 을 모두 했는지 확인
 - [ ] 노트북 저장 (`Ctrl+S`)
+
+**헷갈리기 쉬운 포인트 (최종 정리)**
+
+*공통*
+- 스케일러·selector는 **train으로만 fit**, val/test는 `transform`만. `fit_transform` = `fit` + `transform` 한 번에. (SelectKBest는 `fit_transform(X, y)`로 y도 넣음)
+- `predict` 결과는 **스케일된 값** → `sy.inverse_transform(pred)` 후 원래 단위로 MAE 계산
+- 샘플 1개 예측은 `X[0:1]` (모양 `(1, 6)`, 2차원 유지). `X[0]`은 `(6,)`라 에러
+- 열(출력)별 MAE: `np.mean(np.abs(pred - y), axis=0)` → `axis=0`은 세로(샘플) 방향 평균 → 열마다 1개
+- `def run(...)` 같은 함수는 같은 코드를 여러 번 돌리려고 묶은 것뿐. 시험에서는 위에서 아래로 펼쳐 써도 됨
+  - `run(Q_IN, POSE, batch_size=256)` = 빈칸 `in_cols=Q_IN`, `out_cols=POSE`, `batch_size=256`, 나머지는 기본값으로 채워 한 번 실행
+
+*분할*
+- 랜덤 64:16:20 = `train_test_split` 두 번 (`test_size=0.2` → 남은 80%에서 다시 `0.2` = 16%)
+- `stratify=y` → 클래스 비율 유지. Fashion-MNIST 60,000개를 9:1 → 54,000 / 6,000, 10클래스라 **클래스당 5,400 / 600** (`np.bincount(y)`로 확인)
+- 시계열은 섞지 않음: `train_end = int(n*0.70)`, `val_end = int(n*0.85)` → 앞 70% train, 70~85% val, 나머지 test
+
+*CNN*
+- `Conv2D(32, 3)` = 3×3 필터 32개. 필터 숫자가 학습되는 가중치, 출력 채널 = 32
+- 출력 크기 = **(N − F + 2P) / S + 1**. `padding='same'`이면 P = (F−1)/2 (3×3 → P=1) → stride 1에서 크기 유지. 크기를 반으로 줄이는 건 `MaxPooling2D(2)`
+- Conv 두 줄 쌓기: 3×3 두 번 = 5×5 범위를 보면서 파라미터는 적고 ReLU는 2번
+- BN: 층 출력을 평균 0, 분산 1로 정리 → 학습 안정·가속. BN에 자체 이동값이 있어 Conv/Dense는 `use_bias=False`
+- Dense 앞에 `Flatten()` 필수. 출력 `Dense(10, 'softmax')`, 정수 라벨 → `sparse_categorical_crossentropy`, 원핫 → `categorical_crossentropy`
+- 증강: 수업 방식은 `ImageDataGenerator(...)` + `model.fit(datagen.flow(X, y, batch_size=...))`. 증강 레이어(RandomFlip 등)도 같은 역할
+
+*시각화*
+- `plt.plot(history.history['loss'])` → 에폭마다 1개씩 저장된 리스트라 x축은 자동으로 0, 1, 2, … (에폭)
+- 2×5 그리드: `fig, axes = plt.subplots(2, 5)` → `for i, ax in enumerate(axes.ravel()):` → `ax.imshow(X[i].squeeze(), cmap='gray')`
+- 멈춘 에폭 `len(h.history['loss'])`, 최고 에폭 `np.argmin(h.history['val_loss']) + 1`
+
+*시계열 (ETTh1)*
+- 흐름: 순서대로 분할 → train으로 스케일 → 윈도우 생성 → 모델
+- 윈도우: 과거 96시간 → 다음 24시간. 개수 = 길이 − 96 − 24 + 1 (17,420 → 17,301)
+- 기준선(마지막 값 복사) 1.46°C > 그냥 MLP 1.61 (짐). **Residual**: (정답 − 마지막 값)을 학습, 예측 때 마지막 값을 더함 → 1.36 최고
+
+*기구학*
+- FK: q1~q6 → x, y, z, yaw, pitch, roll / IK: 반대. 코드는 **X, y 열만 바꾸면 끝**
+- IK가 어려운 이유: 같은 위치를 만드는 관절각 조합이 여러 개
+- 모델 `Input(6) → Dense relu ×3 → Dense(6)` (활성화 없음, `mse`)
+- Wrapped MAE: +π와 −π는 같은 방향 → `d = np.arctan2(np.sin(p - t), np.cos(p - t))`로 −π~π로 바꾼 뒤 `np.mean(np.abs(d), axis=0)`
+
+*Ames 회귀*
+- 결측 처리 → 범주형 OneHot, 수치형 StandardScaler → y도 스케일 → MLP → `inverse_transform` → 달러 MAE
+- 결과: Dropout 0.1 최고, BN·log 변환은 오히려 나빠짐
+- `SelectKBest(f_regression, k)`: y와의 관계 점수로 상위 k개 열만 (분류는 `f_classif`). 열을 하나씩 따로 평가해서 interaction을 놓칠 수 있음 → 성능이 떨어질 수 있음
+
 
 [⬆ 목차로 돌아가기](#목차)
 
